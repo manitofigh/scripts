@@ -1,0 +1,156 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_NAME=$(basename "$0")
+SPACE=0
+
+usage() {
+    cat << EOF
+Usage: $SCRIPT_NAME [OPTIONS] NUMBER
+
+Convert between binary, hexadecimal, and decimal number systems.
+
+Options:
+  --bth         Convert binary to hexadecimal (output prefixed with 0x)
+  --htb         Convert hexadecimal to binary (input can be prefixed with 0x)
+  --htd         Convert hexadecimal to decimal (input can be prefixed with 0x)
+  --dth         Convert decimal to hexadecimal (output prefixed with 0x)
+  --dtb         Convert decimal to binary
+  --btd         Convert binary to decimal
+  --space NUM   Set space interval for binary output (default: 4)
+  -h, --help    Display this help message and exit
+
+Example:
+  $SCRIPT_NAME --dtb 133 --space 2
+  $SCRIPT_NAME --htb 0x2C
+EOF
+}
+
+error() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+validate_binary() {
+    if ! [[ "$1" =~ ^[01]+$ ]]; then
+        error "Invalid binary number: $1"
+    fi
+}
+
+validate_hex() {
+    if ! [[ "$1" =~ ^(0x)?[0-9A-Fa-f]+$ ]]; then
+        error "Invalid hexadecimal number: $1"
+    fi
+}
+
+validate_decimal() {
+    if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+        error "Invalid decimal number: $1"
+    fi
+}
+
+format_binary() {
+    local binary=$1
+    local formatted=""
+    local i=0
+    if [[ $SPACE -eq 0 ]]; then
+        echo "$binary"
+        return
+    fi
+    for (( i=${#binary}-1; i>=0; i-- )); do
+        formatted="${binary:$i:1}$formatted"
+        if (( (${#binary}-i) % SPACE == 0 )) && (( i != 0 )); then
+            formatted=" $formatted"
+        fi
+    done
+    echo "$formatted"
+}
+
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --bth)
+            CONVERSION="bth"
+            shift
+            ;;
+        --htb)
+            CONVERSION="htb"
+            shift
+            ;;
+        --htd)
+            CONVERSION="htd"
+            shift
+            ;;
+        --dth)
+            CONVERSION="dth"
+            shift
+            ;;
+        --dtb)
+            CONVERSION="dtb"
+            shift
+            ;;
+        --btd)
+            CONVERSION="btd"
+            shift
+            ;;
+        --space)
+            if [[ -z "$2" ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                error "Invalid space value: $2"
+            fi
+            SPACE=$2
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            NUMBER=$1
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$CONVERSION" ]] || [[ -z "$NUMBER" ]]; then
+    error "Missing required arguments"
+fi
+
+case $CONVERSION in
+    bth)
+        validate_binary "$NUMBER"
+        result=$(echo "ibase=2; obase=16; $NUMBER" | bc)
+        echo "0x${result}"
+        ;;
+    htb)
+        validate_hex "$NUMBER"
+        NUMBER=${NUMBER#0x}  # Remove 0x prefix if present
+        result=$(echo "ibase=16; obase=2; $(echo $NUMBER | tr '[:lower:]' '[:upper:]')" | bc)
+        format_binary "$result"
+        ;;
+    htd)
+        validate_hex "$NUMBER"
+        NUMBER=${NUMBER#0x}  # Remove 0x prefix if present
+        result=$(echo "ibase=16; $(echo $NUMBER | tr '[:lower:]' '[:upper:]')" | bc)
+        echo "$result"
+        ;;
+    dth)
+        validate_decimal "$NUMBER"
+        result=$(echo "obase=16; $NUMBER" | bc)
+        echo "0x${result}"
+        ;;
+    dtb)
+        validate_decimal "$NUMBER"
+        result=$(echo "obase=2; $NUMBER" | bc)
+        format_binary "$result"
+        ;;
+    btd)
+        validate_binary "$NUMBER"
+        result=$(echo "ibase=2; $NUMBER" | bc)
+        echo "$result"
+        ;;
+esac

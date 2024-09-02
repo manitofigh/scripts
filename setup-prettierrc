@@ -1,0 +1,54 @@
+#!/bin/bash
+
+###############################################################################
+# This script creates a .prettierrc file with predefined configuration settings
+# in the current directory. It checks for an existing file and asks for
+# confirmation before overwriting. It also confirms the current directory
+# before creating the file.
+#
+# Author: Mani Tofigh
+###############################################################################
+
+set -e
+
+# Function to print centered messages
+print_centered() {
+    local message="$1"
+    local padding=$(( (80 - ${#message}) / 2 ))
+    printf "%${padding}s%s%${padding}s\n" "" "$message" "" | tr ' ' '*'
+}
+
+# Function to create the .prettierrc file
+create_prettierrc() {
+    cat > .prettierrc << EOF
+{
+    "singleQuote": true,
+    "semi": true,
+    "tabWidth": 4,
+    "bracketSpacing": true
+}
+EOF
+    print_centered "Created .prettierrc file successfully"
+}
+
+# Confirm current directory
+print_centered "Current directory: $(pwd)"
+read -p "Is this the correct directory to create .prettierrc? (y/n): " confirm
+if [[ $confirm != [yY] ]]; then
+    print_centered "Operation cancelled"
+    exit 0
+fi
+
+# Check if .prettierrc already exists
+if [[ -f .prettierrc ]]; then
+    read -p ".prettierrc already exists. Overwrite? (y/n): " overwrite
+    if [[ $overwrite != [yY] ]]; then
+        print_centered "Operation cancelled"
+        exit 0
+    fi
+fi
+
+# Create .prettierrc file
+create_prettierrc
+
+exit 0

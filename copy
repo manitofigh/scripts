@@ -1,0 +1,141 @@
+#!/bin/bash
+
+#######################################################################
+# This script interactively copies a directory from a remote machine
+# to the local machine using rsync over SSH. It prompts the user for
+# connection details, source, and destination paths.
+#
+# Author: Mani Tofigh
+#######################################################################
+
+set -e
+
+print_centered() {
+    local message="$1"
+    local width=80
+    local padding=$(( (width - ${#message}) / 2 ))
+    printf "%${padding}s%s%${padding}s\n" "" "$message" ""
+}
+
+print_error() {
+    local message="$1"
+    echo -e "\033[1;31mERROR: $message\033[0m" >&2
+}
+
+print_success() {
+    local message="$1"
+    echo -e "\033[1;32m$message\033[0m"
+}
+
+usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Options:
+    -h, --help      Show this help message and exit
+
+This script interactively copies a directory from a remote machine to the local
+machine using rsync over SSH. It will prompt for the following information:
+
+    - Remote machine IP address
+    - SSH authentication method (key or password)
+    - Remote username (if using password authentication)
+    - Remote source directory path
+    - Local destination directory path
+
+EOF
+}
+
+check_rsync() {
+    if ! command -v rsync &> /dev/null; then
+        print_error "rsync is not installed. Please install it and try again."
+        exit 1
+    fi
+}
+
+get_remote_ip() {
+    local ip
+    while true; do
+        read -p "Enter the IP address of the remote machine: " ip
+        if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        else
+            print_error "Invalid IP address format. Please try again."
+        fi
+    done
+}
+
+get_auth_method() {
+    local method
+    while true; do
+        read -p "Do you want to use SSH key authentication? (y/n): " method
+        case $method in
+            [Yy]) echo "key"; return ;;
+            [Nn]) echo "password"; return ;;
+            *) print_error "Invalid input. Please enter 'y' or 'n'." ;;
+        esac
+    done
+}
+
+get_remote_username() {
+    local username
+    read -p "Enter the remote username: " username
+    echo "$username"
+}
+
+get_remote_path() {
+    local path
+    read -p "Enter the path of the directory on the remote machine: " path
+    echo "$path"
+}
+
+get_local_path() {
+    local path
+    read -p "Enter the local path where you want to store the copied directory: " path
+    echo "$path"
+}
+
+main() {
+    check_rsync
+
+    print_centered "Remote Directory Copy Script"
+    echo
+
+    local remote_ip=$(get_remote_ip)
+    local auth_method=$(get_auth_method)
+    local remote_user
+    local ssh_options="-o StrictHostKeyChecking=no"
+
+    if [ "$auth_method" = "password" ]; then
+        remote_user=$(get_remote_username)
+        ssh_options+=" -o PubkeyAuthentication=no"
+    fi
+
+    local remote_path=$(get_remote_path)
+    local local_path=$(get_local_path)
+
+    mkdir -p "$local_path"
+
+    local rsync_command="rsync -avz --progress"
+    if [ "$auth_method" = "password" ]; then
+        rsync_command+=" -e \"ssh $ssh_options\" ${remote_user}@${remote_ip}:\"${remote_path}\" \"${local_path}\""
+    else
+        rsync_command+=" -e \"ssh $ssh_options\" ${remote_ip}:\"${remote_path}\" \"${local_path}\""
+    fi
+
+    echo "Copying files from remote machine..."
+    if eval $rsync_command; then
+        print_success "Directory copied successfully!"
+    else
+        print_error "Failed to copy directory. Please check your inputs and try again."
+        exit 1
+    fi
+}
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    usage
+    exit 0
+fi
+
+main

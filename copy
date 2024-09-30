@@ -123,6 +123,7 @@ main() {
     else
         rsync_command+=" -e \"ssh $ssh_options\" ${remote_ip}:\"${remote_path}\" \"${local_path}\""
     fi
+    echo "[+] The command ran: $rsync_command"
 
     echo "Copying files from remote machine..."
     if eval $rsync_command; then

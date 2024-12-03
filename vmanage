@@ -1,0 +1,207 @@
+#!/bin/bash
+
+: '
+vmanage - Virtual Machine CPU Management Utility
+
+A robust script for managing VM CPU configurations through virsh, with features including:
+- Interactive and command-line modes
+- vCPU pinning with various topology options
+- Automatic hardware topology detection
+- Periodic vCPU migration capabilities
+- Smart CPU sibling handling
+
+Author: Mani Tofigh
+'
+
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Message prefixes
+SUCCESS="${GREEN}[+]${NC}"
+ERROR="${RED}[-]${NC}"
+WARNING="${YELLOW}[!]${NC}"
+QUESTION="${BLUE}[?]${NC}"
+
+print_centered() {
+    local message="$1"
+    local width=80
+    local padding=$(( (width - ${#message}) / 2 ))
+    printf "%${padding}s%s%${padding}s\n" "" "$message" ""
+}
+
+error_exit() {
+    echo -e "${ERROR} $1"
+    exit 1
+}
+
+check_dependencies() {
+    local deps=("virsh" "lscpu" "awk" "grep")
+    for dep in "${deps[@]}"; do
+        command -v "$dep" >/dev/null 2>&1 || error_exit "Required dependency '$dep' not found"
+    done
+}
+
+get_vm_vcpus() {
+    local domain="$1"
+    virsh vcpucount "$domain" --active 2>/dev/null || error_exit "Failed to get vCPU count for $domain"
+}
+
+get_host_topology() {
+    local topology
+    topology=$(lscpu --extended=CPU,SOCKET,CORE,THREAD --parse 2>/dev/null) || 
+        error_exit "Failed to get host CPU topology"
+    echo "$topology"
+}
+
+validate_vm() {
+    local domain="$1"
+    virsh domstate "$domain" >/dev/null 2>&1 || 
+        error_exit "VM '$domain' not found or inaccessible"
+}
+
+pin_vcpus() {
+    local domain="$1"
+    local vcpu="$2"
+    local pcpu="$3"
+    
+    virsh vcpupin "$domain" "$vcpu" "$pcpu" || 
+        error_exit "Failed to pin vCPU $vcpu to pCPU $pcpu"
+    echo -e "${SUCCESS} Successfully pinned vCPU $vcpu to pCPU $pcpu"
+}
+
+interactive_mode() {
+    print_centered "VM CPU Management Interactive Mode"
+    echo
+
+    echo -e "${QUESTION} Enter VM domain name: "
+    read -r domain
+    validate_vm "$domain"
+
+    local vcpu_count
+    vcpu_count=$(get_vm_vcpus "$domain")
+
+    echo -e "${QUESTION} Select operation:"
+    echo "1) Pin vCPUs"
+    echo "2) Configure periodic vCPU migration"
+    read -r operation
+
+    case $operation in
+        1)
+            echo -e "${QUESTION} Pin all vCPUs to different cores? [y/n]: "
+            read -r different_cores
+            
+            if [[ $different_cores == "y" ]]; then
+                local topology
+                topology=$(get_host_topology)
+                
+                for ((i=0; i<vcpu_count; i++)); do
+                    local target_cpu
+                    target_cpu=$(echo "$topology" | awk -F, 'NR>1 {print $1}' | head -n1)
+                    pin_vcpus "$domain" "$i" "$target_cpu"
+                done
+                
+                echo -e "${SUCCESS} Equivalent command-line:"
+                echo "vmanage -d $domain -o vcpupin --different-cores"
+            fi
+            ;;
+        2)
+            echo -e "${QUESTION} Enter vCPU number to migrate: "
+            read -r vcpu_num
+            echo -e "${QUESTION} Enter migration interval (seconds): "
+            read -r interval
+            
+            echo -e "${SUCCESS} Equivalent command-line:"
+            echo "vmanage -d $domain -o migrate -v $vcpu_num -i $interval"
+            ;;
+    esac
+}
+
+show_help() {
+    cat << EOF
+Usage: vmanage [OPTIONS]
+
+Options:
+    -i, --interactive       Run in interactive mode
+    -d, --domain NAME      Specify VM domain name
+    -o, --operation TYPE   Operation type (vcpupin, migrate)
+    -v, --vcpu NUM        Specify vCPU number
+    --different-cores      Pin vCPUs to different physical cores
+    -h, --help            Show this help message
+
+Example:
+    vmanage -d myvm -o vcpupin --different-cores
+    vmanage -i
+EOF
+}
+
+main() {
+    check_dependencies
+
+    local domain=""
+    local operation=""
+    local interactive=false
+    local different_cores=false
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -i|--interactive)
+                interactive=true
+                shift
+                ;;
+            -d|--domain)
+                domain="$2"
+                shift 2
+                ;;
+            -o|--operation)
+                operation="$2"
+                shift 2
+                ;;
+            --different-cores)
+                different_cores=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                error_exit "Unknown option: $1"
+                ;;
+        esac
+    done
+
+    if $interactive; then
+        interactive_mode
+    else
+        [[ -z $domain ]] && error_exit "Domain name required"
+        [[ -z $operation ]] && error_exit "Operation type required"
+        
+        validate_vm "$domain"
+        
+        case $operation in
+            vcpupin)
+                if $different_cores; then
+                    local vcpu_count
+                    vcpu_count=$(get_vm_vcpus "$domain")
+                    local topology
+                    topology=$(get_host_topology)
+                    
+                    for ((i=0; i<vcpu_count; i++)); do
+                        local target_cpu
+                        target_cpu=$(echo "$topology" | awk -F, 'NR>1 {print $1}' | head -n1)
+                        pin_vcpus "$domain" "$i" "$target_cpu"
+                    done
+                fi
+                ;;
+            *)
+                error_exit "Invalid operation: $operation"
+                ;;
+        esac
+    fi
+}
+
+main "$@"

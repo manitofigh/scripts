@@ -60,6 +60,7 @@ DISTRIBUTE=0
 CORE1=""
 CORE2=""
 INTERVAL=""
+VCPU_NUM=""
 SHOW_HELP=0
 BACKGROUND=""
 
@@ -77,16 +78,22 @@ show_help() {
     echo "      --core1 CORE         Migration core 1"
     echo "      --core2 CORE         Migration core 2"
     echo "      --interval INTERVAL  Migration interval"
+    echo "      --vcpu VCPU_NUM      vCPU number to migrate"
     echo "  -h, --help               Show this help message"
     echo ""
     echo "Examples:"
     echo "  vmanage -i"
+    echo "    # Runs the script in interactive mode."
+    echo ""
     echo "  vmanage -d vm1 -o vcpupin -s 0"
-    echo "  vmanage -d vm1 -o migrate --core1 0 --core2 4 --interval 60"
+    echo "    # Pins all vCPUs of 'vm1' to socket 0."
+    echo ""
+    echo "  vmanage -d vm1 -o migrate --vcpu 1 --core1 0 --core2 4 --interval 60"
+    echo "    # Migrates vCPU 1 of 'vm1' between physical cores 0 and 4 every 60 seconds."
 }
 
 # Parse command-line arguments
-TEMP=$(getopt -o id:o:s:h --long interactive,domain:,operation:,socket:,same-core,distribute,core1:,core2:,interval:,help -n 'vmanage' -- "$@")
+TEMP=$(getopt -o id:o:s:h --long interactive,domain:,operation:,socket:,same-core,distribute,core1:,core2:,interval:,vcpu:,help -n 'vmanage' -- "$@")
 if [ $? != 0 ]; then
     print_error "Error parsing options."
     exit 1
@@ -130,6 +137,10 @@ while true; do
         ;;
     --interval)
         INTERVAL="$2"
+        shift 2
+        ;;
+    --vcpu)
+        VCPU_NUM="$2"
         shift 2
         ;;
     -h | --help)
@@ -221,10 +232,27 @@ vcpupin_interactive() {
 }
 
 migrate_interactive() {
+    check_vm_exists
     get_cpu_topology
-    print_question "Enter the first core for migration (0 to $(($TOTAL_CORES - 1))):"
+
+    VCPU_COUNT=$(virsh dominfo "$DOMAIN" | awk '/^CPU.s.:/ {print $2}')
+    if [ -z "$VCPU_COUNT" ]; then
+        print_error "Failed to get vCPU count for domain '$DOMAIN'."
+        exit 1
+    fi
+    VCPU_MAX_INDEX=$(($VCPU_COUNT - 1))
+
+    print_question "Enter the vCPU number to migrate (0 to $VCPU_MAX_INDEX):"
+    read VCPU_NUM
+
+    if [ -z "$VCPU_NUM" ] || [ "$VCPU_NUM" -lt 0 ] || [ "$VCPU_NUM" -gt "$VCPU_MAX_INDEX" ]; then
+        print_error "Invalid vCPU number '$VCPU_NUM'."
+        exit 1
+    fi
+
+    print_question "Enter the first physical core for migration (0 to $(($TOTAL_CORES - 1))):"
     read CORE1
-    print_question "Enter the second core for migration (0 to $(($TOTAL_CORES - 1))):"
+    print_question "Enter the second physical core for migration (0 to $(($TOTAL_CORES - 1))):"
     read CORE2
     print_question "Enter the migration interval in seconds:"
     read INTERVAL
@@ -306,6 +334,12 @@ migrate_operation() {
     check_vm_exists
     get_cpu_topology
 
+    VCPU_COUNT=$(virsh dominfo "$DOMAIN" | awk '/^CPU.s.:/ {print $2}')
+    if [ -z "$VCPU_NUM" ] || [ "$VCPU_NUM" -lt 0 ] || [ "$VCPU_NUM" -ge "$VCPU_COUNT" ]; then
+        print_error "Invalid or unspecified vCPU number '$VCPU_NUM'."
+        exit 1
+    fi
+
     if [ -z "$CORE1" ] || [ -z "$CORE2" ] || [ -z "$INTERVAL" ]; then
         print_error "Core1, Core2, and Interval must be specified for migration."
         exit 1
@@ -321,20 +355,26 @@ migrate_operation() {
         exit 1
     fi
 
+    # Display equivalent command-line syntax
+    CMD="vmanage -d $DOMAIN -o migrate --vcpu $VCPU_NUM --core1 $CORE1 --core2 $CORE2 --interval $INTERVAL"
+    [ "$BACKGROUND" =~ ^[Yy]$ ] && CMD+=" &"
+    print_success "Equivalent command-line syntax:"
+    echo "$CMD"
+
     migrate_loop() {
         while true; do
-            virsh vcpupin "$DOMAIN" --vcpu 0 --cpulist "$CORE1" &>/dev/null
+            virsh vcpupin "$DOMAIN" --vcpu "$VCPU_NUM" --cpulist "$CORE1" &>/dev/null
             if [ $? -eq 0 ]; then
-                print_success "Migrated vCPU to core $CORE1"
+                print_success "Migrated vCPU $VCPU_NUM to core $CORE1"
             else
-                print_error "Failed to migrate vCPU to core $CORE1"
+                print_error "Failed to migrate vCPU $VCPU_NUM to core $CORE1"
             fi
             sleep "$INTERVAL"
-            virsh vcpupin "$DOMAIN" --vcpu 0 --cpulist "$CORE2" &>/dev/null
+            virsh vcpupin "$DOMAIN" --vcpu "$VCPU_NUM" --cpulist "$CORE2" &>/dev/null
             if [ $? -eq 0 ]; then
-                print_success "Migrated vCPU to core $CORE2"
+                print_success "Migrated vCPU $VCPU_NUM to core $CORE2"
             else
-                print_error "Failed to migrate vCPU to core $CORE2"
+                print_error "Failed to migrate vCPU $VCPU_NUM to core $CORE2"
             fi
             sleep "$INTERVAL"
         done
@@ -343,8 +383,6 @@ migrate_operation() {
     if [[ "$BACKGROUND" =~ ^[Yy]$ ]]; then
         nohup bash -c "$(declare -f migrate_loop); migrate_loop" &>/dev/null &
         print_success "Migration started in background."
-        print_success "Equivalent command:"
-        echo "nohup vmanage -d $DOMAIN -o migrate --core1 $CORE1 --core2 $CORE2 --interval $INTERVAL &"
     else
         migrate_loop
     fi

@@ -1,207 +1,372 @@
 #!/bin/bash
 
-: '
-vmanage - Virtual Machine CPU Management Utility
+#
+# vmanage - VM CPU Management Script
+#
+# This script manages VM CPU configurations using virsh. It supports vCPU pinning and migration operations,
+# providing both interactive and command-line modes with robust error handling and a user-friendly interface.
+#
+# Author: Mani Tofigh
+#
 
-A robust script for managing VM CPU configurations through virsh, with features including:
-- Interactive and command-line modes
-- vCPU pinning with various topology options
-- Automatic hardware topology detection
-- Periodic vCPU migration capabilities
-- Smart CPU sibling handling
+# Color Codes
+GREEN='\e[32m'
+RED='\e[31m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+NC='\e[0m' # No Color
 
-Author: Mani Tofigh
-'
-
-# Color definitions
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-# Message prefixes
-SUCCESS="${GREEN}[+]${NC}"
-ERROR="${RED}[-]${NC}"
-WARNING="${YELLOW}[!]${NC}"
-QUESTION="${BLUE}[?]${NC}"
-
-print_centered() {
-    local message="$1"
-    local width=80
-    local padding=$(( (width - ${#message}) / 2 ))
-    printf "%${padding}s%s%${padding}s\n" "" "$message" ""
+# Function to print success messages
+print_success() {
+    echo -e "${GREEN}[+]${NC} $1"
 }
 
-error_exit() {
-    echo -e "${ERROR} $1"
+# Function to print error messages
+print_error() {
+    echo -e "${RED}[-]${NC} $1"
+}
+
+# Function to print warning messages
+print_warning() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
+
+# Function to print question prompts
+print_question() {
+    echo -ne "${BLUE}[?]${NC} $1 "
+}
+
+# Check for sudo privileges
+if [ "$EUID" -ne 0 ]; then
+    print_error "This script must be run as root."
     exit 1
-}
+fi
 
-check_dependencies() {
-    local deps=("virsh" "lscpu" "awk" "grep")
-    for dep in "${deps[@]}"; do
-        command -v "$dep" >/dev/null 2>&1 || error_exit "Required dependency '$dep' not found"
-    done
-}
+# Check for required commands
+for cmd in virsh lscpu getopt; do
+    if ! command -v $cmd &>/dev/null; then
+        print_error "Required command '$cmd' not found."
+        exit 1
+    fi
+done
 
-get_vm_vcpus() {
-    local domain="$1"
-    virsh vcpucount "$domain" --active 2>/dev/null || error_exit "Failed to get vCPU count for $domain"
-}
+# Initialize variables
+INTERACTIVE_MODE=0
+DOMAIN=""
+OPERATION=""
+SOCKET=""
+SAME_CORE=0
+DISTRIBUTE=0
+CORE1=""
+CORE2=""
+INTERVAL=""
+SHOW_HELP=0
+BACKGROUND=""
 
-get_host_topology() {
-    local topology
-    topology=$(lscpu --extended=CPU,SOCKET,CORE,THREAD --parse 2>/dev/null) || 
-        error_exit "Failed to get host CPU topology"
-    echo "$topology"
-}
-
-validate_vm() {
-    local domain="$1"
-    virsh domstate "$domain" >/dev/null 2>&1 || 
-        error_exit "VM '$domain' not found or inaccessible"
-}
-
-pin_vcpus() {
-    local domain="$1"
-    local vcpu="$2"
-    local pcpu="$3"
-    
-    virsh vcpupin "$domain" "$vcpu" "$pcpu" || 
-        error_exit "Failed to pin vCPU $vcpu to pCPU $pcpu"
-    echo -e "${SUCCESS} Successfully pinned vCPU $vcpu to pCPU $pcpu"
-}
-
-interactive_mode() {
-    print_centered "VM CPU Management Interactive Mode"
-    echo
-
-    echo -e "${QUESTION} Enter VM domain name: "
-    read -r domain
-    validate_vm "$domain"
-
-    local vcpu_count
-    vcpu_count=$(get_vm_vcpus "$domain")
-
-    echo -e "${QUESTION} Select operation:"
-    echo "1) Pin vCPUs"
-    echo "2) Configure periodic vCPU migration"
-    read -r operation
-
-    case $operation in
-        1)
-            echo -e "${QUESTION} Pin all vCPUs to different cores? [y/n]: "
-            read -r different_cores
-            
-            if [[ $different_cores == "y" ]]; then
-                local topology
-                topology=$(get_host_topology)
-                
-                for ((i=0; i<vcpu_count; i++)); do
-                    local target_cpu
-                    target_cpu=$(echo "$topology" | awk -F, 'NR>1 {print $1}' | head -n1)
-                    pin_vcpus "$domain" "$i" "$target_cpu"
-                done
-                
-                echo -e "${SUCCESS} Equivalent command-line:"
-                echo "vmanage -d $domain -o vcpupin --different-cores"
-            fi
-            ;;
-        2)
-            echo -e "${QUESTION} Enter vCPU number to migrate: "
-            read -r vcpu_num
-            echo -e "${QUESTION} Enter migration interval (seconds): "
-            read -r interval
-            
-            echo -e "${SUCCESS} Equivalent command-line:"
-            echo "vmanage -d $domain -o migrate -v $vcpu_num -i $interval"
-            ;;
-    esac
-}
-
+# Function to display help
 show_help() {
-    cat << EOF
-Usage: vmanage [OPTIONS]
-
-Options:
-    -i, --interactive       Run in interactive mode
-    -d, --domain NAME      Specify VM domain name
-    -o, --operation TYPE   Operation type (vcpupin, migrate)
-    -v, --vcpu NUM        Specify vCPU number
-    --different-cores      Pin vCPUs to different physical cores
-    -h, --help            Show this help message
-
-Example:
-    vmanage -d myvm -o vcpupin --different-cores
-    vmanage -i
-EOF
+    echo "Usage: vmanage [options]"
+    echo ""
+    echo "Options:"
+    echo "  -i, --interactive        Interactive mode"
+    echo "  -d, --domain DOMAIN      VM domain name"
+    echo "  -o, --operation OP       Operation type (vcpupin/migrate)"
+    echo "  -s, --socket SOCKET      Socket number"
+    echo "      --same-core          Use sibling threads"
+    echo "      --distribute         Spread across sockets"
+    echo "      --core1 CORE         Migration core 1"
+    echo "      --core2 CORE         Migration core 2"
+    echo "      --interval INTERVAL  Migration interval"
+    echo "  -h, --help               Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  vmanage -i"
+    echo "  vmanage -d vm1 -o vcpupin -s 0"
+    echo "  vmanage -d vm1 -o migrate --core1 0 --core2 4 --interval 60"
 }
 
-main() {
-    check_dependencies
+# Parse command-line arguments
+TEMP=$(getopt -o id:o:s:h --long interactive,domain:,operation:,socket:,same-core,distribute,core1:,core2:,interval:,help -n 'vmanage' -- "$@")
+if [ $? != 0 ]; then
+    print_error "Error parsing options."
+    exit 1
+fi
 
-    local domain=""
-    local operation=""
-    local interactive=false
-    local different_cores=false
+eval set -- "$TEMP"
 
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -i|--interactive)
-                interactive=true
-                shift
-                ;;
-            -d|--domain)
-                domain="$2"
-                shift 2
-                ;;
-            -o|--operation)
-                operation="$2"
-                shift 2
-                ;;
-            --different-cores)
-                different_cores=true
-                shift
-                ;;
-            -h|--help)
-                show_help
-                exit 0
-                ;;
-            *)
-                error_exit "Unknown option: $1"
-                ;;
-        esac
-    done
+while true; do
+    case "$1" in
+    -i | --interactive)
+        INTERACTIVE_MODE=1
+        shift
+        ;;
+    -d | --domain)
+        DOMAIN="$2"
+        shift 2
+        ;;
+    -o | --operation)
+        OPERATION="$2"
+        shift 2
+        ;;
+    -s | --socket)
+        SOCKET="$2"
+        shift 2
+        ;;
+    --same-core)
+        SAME_CORE=1
+        shift
+        ;;
+    --distribute)
+        DISTRIBUTE=1
+        shift
+        ;;
+    --core1)
+        CORE1="$2"
+        shift 2
+        ;;
+    --core2)
+        CORE2="$2"
+        shift 2
+        ;;
+    --interval)
+        INTERVAL="$2"
+        shift 2
+        ;;
+    -h | --help)
+        SHOW_HELP=1
+        shift
+        ;;
+    --)
+        shift
+        break
+        ;;
+    *)
+        print_error "Invalid option: $1"
+        exit 1
+        ;;
+    esac
+done
 
-    if $interactive; then
-        interactive_mode
-    else
-        [[ -z $domain ]] && error_exit "Domain name required"
-        [[ -z $operation ]] && error_exit "Operation type required"
-        
-        validate_vm "$domain"
-        
-        case $operation in
-            vcpupin)
-                if $different_cores; then
-                    local vcpu_count
-                    vcpu_count=$(get_vm_vcpus "$domain")
-                    local topology
-                    topology=$(get_host_topology)
-                    
-                    for ((i=0; i<vcpu_count; i++)); do
-                        local target_cpu
-                        target_cpu=$(echo "$topology" | awk -F, 'NR>1 {print $1}' | head -n1)
-                        pin_vcpus "$domain" "$i" "$target_cpu"
-                    done
-                fi
-                ;;
-            *)
-                error_exit "Invalid operation: $operation"
-                ;;
-        esac
+if [ $SHOW_HELP -eq 1 ]; then
+    show_help
+    exit 0
+fi
+
+# Function to check if VM exists
+check_vm_exists() {
+    if ! virsh dominfo "$DOMAIN" &>/dev/null; then
+        print_error "Domain '$DOMAIN' does not exist."
+        exit 1
     fi
 }
 
-main "$@"
+# Function to get CPU topology
+get_cpu_topology() {
+    SOCKETS=$(lscpu | awk '/Socket\(s\):/ {print $2}')
+    CORES_PER_SOCKET=$(lscpu | awk '/Core\(s\) per socket:/ {print $4}')
+    THREADS_PER_CORE=$(lscpu | awk '/Thread\(s\) per core:/ {print $4}')
+    TOTAL_CORES=$(lscpu | awk '/^CPU\(s\):/ {print $2}')
+}
+
+# Interactive mode functions
+interactive_mode() {
+    print_question "Enter the domain name of the VM:"
+    read DOMAIN
+    check_vm_exists
+
+    print_question "Select operation type:\n1) vcpupin\n2) migrate\nEnter choice [1-2]:"
+    read op_choice
+
+    if [ "$op_choice" == "1" ]; then
+        OPERATION="vcpupin"
+    elif [ "$op_choice" == "2" ]; then
+        OPERATION="migrate"
+    else
+        print_error "Invalid choice."
+        exit 1
+    fi
+
+    if [ "$OPERATION" == "vcpupin" ]; then
+        vcpupin_interactive
+    elif [ "$OPERATION" == "migrate" ]; then
+        migrate_interactive
+    fi
+}
+
+vcpupin_interactive() {
+    get_cpu_topology
+    print_question "Do you want to pin to the same socket? (y/N)"
+    read SAME_SOCKET
+
+    if [[ "$SAME_SOCKET" =~ ^[Yy]$ ]]; then
+        print_question "Enter socket number (0 to $(($SOCKETS - 1))):"
+        read SOCKET
+    fi
+
+    print_question "Do you want to use sibling threads (same core)? (y/N)"
+    read SIBLING_THREADS
+
+    if [[ "$SIBLING_THREADS" =~ ^[Yy]$ ]]; then
+        SAME_CORE=1
+    fi
+
+    print_question "Do you want to distribute vCPUs across sockets? (y/N)"
+    read DISTRIBUTE_CPUS
+
+    if [[ "$DISTRIBUTE_CPUS" =~ ^[Yy]$ ]]; then
+        DISTRIBUTE=1
+    fi
+
+    vcpupin_operation
+}
+
+migrate_interactive() {
+    get_cpu_topology
+    print_question "Enter the first core for migration (0 to $(($TOTAL_CORES - 1))):"
+    read CORE1
+    print_question "Enter the second core for migration (0 to $(($TOTAL_CORES - 1))):"
+    read CORE2
+    print_question "Enter the migration interval in seconds:"
+    read INTERVAL
+    print_question "Do you want to run the migration in background? (y/N)"
+    read BACKGROUND
+
+    migrate_operation
+}
+
+# vcpupin operation
+vcpupin_operation() {
+    check_vm_exists
+    get_cpu_topology
+
+    VCPU_COUNT=$(virsh dominfo "$DOMAIN" | awk '/^CPU.s.:/ {print $2}')
+    if [ -z "$VCPU_COUNT" ]; then
+        print_error "Failed to get vCPU count for domain '$DOMAIN'."
+        exit 1
+    fi
+
+    print_success "vCPU count for domain '$DOMAIN': $VCPU_COUNT"
+
+    declare -a CPU_MAP
+
+    if [ "$SAME_CORE" -eq 1 ]; then
+        CORE_INDEX=0
+        for ((i = 0; i < VCPU_COUNT; i++)); do
+            PHYSICAL_CPU=$((CORE_INDEX * THREADS_PER_CORE))
+            CPU_MAP[$i]=$PHYSICAL_CPU
+            ((CORE_INDEX++))
+            if [ $CORE_INDEX -ge $CORES_PER_SOCKET ]; then
+                CORE_INDEX=0
+            fi
+        done
+    elif [ "$DISTRIBUTE" -eq 1 ]; then
+        SOCKET_INDEX=0
+        for ((i = 0; i < VCPU_COUNT; i++)); do
+            PHYSICAL_CPU=$((SOCKET_INDEX * CORES_PER_SOCKET * THREADS_PER_CORE + i % (CORES_PER_SOCKET * THREADS_PER_CORE)))
+            CPU_MAP[$i]=$PHYSICAL_CPU
+            ((SOCKET_INDEX++))
+            if [ $SOCKET_INDEX -ge $SOCKETS ]; then
+                SOCKET_INDEX=0
+            fi
+        done
+    elif [ -n "$SOCKET" ]; then
+        if [ "$SOCKET" -ge "$SOCKETS" ] || [ "$SOCKET" -lt 0 ]; then
+            print_error "Invalid socket number '$SOCKET'."
+            exit 1
+        fi
+        for ((i = 0; i < VCPU_COUNT; i++)); do
+            PHYSICAL_CPU=$((SOCKET * CORES_PER_SOCKET * THREADS_PER_CORE + i % (CORES_PER_SOCKET * THREADS_PER_CORE)))
+            CPU_MAP[$i]=$PHYSICAL_CPU
+        done
+    else
+        for ((i = 0; i < VCPU_COUNT; i++)); do
+            CPU_MAP[$i]=$i
+        done
+    fi
+
+    for ((i = 0; i < VCPU_COUNT; i++)); do
+        virsh vcpupin "$DOMAIN" $i ${CPU_MAP[$i]} &>/dev/null
+        if [ $? -eq 0 ]; then
+            print_success "Pinned vCPU $i to physical CPU ${CPU_MAP[$i]}"
+        else
+            print_error "Failed to pin vCPU $i"
+        fi
+    done
+
+    print_success "Equivalent command-line syntax:"
+    CMD="vmanage -d $DOMAIN -o vcpupin"
+    [ "$SAME_CORE" -eq 1 ] && CMD+=" --same-core"
+    [ "$DISTRIBUTE" -eq 1 ] && CMD+=" --distribute"
+    [ -n "$SOCKET" ] && CMD+=" -s $SOCKET"
+    echo "$CMD"
+}
+
+# Migrate operation
+migrate_operation() {
+    check_vm_exists
+    get_cpu_topology
+
+    if [ -z "$CORE1" ] || [ -z "$CORE2" ] || [ -z "$INTERVAL" ]; then
+        print_error "Core1, Core2, and Interval must be specified for migration."
+        exit 1
+    fi
+
+    if [ "$CORE1" -ge "$TOTAL_CORES" ] || [ "$CORE1" -lt 0 ]; then
+        print_error "Invalid core number '$CORE1'."
+        exit 1
+    fi
+
+    if [ "$CORE2" -ge "$TOTAL_CORES" ] || [ "$CORE2" -lt 0 ]; then
+        print_error "Invalid core number '$CORE2'."
+        exit 1
+    fi
+
+    migrate_loop() {
+        while true; do
+            virsh vcpupin "$DOMAIN" --vcpu 0 --cpulist "$CORE1" &>/dev/null
+            if [ $? -eq 0 ]; then
+                print_success "Migrated vCPU to core $CORE1"
+            else
+                print_error "Failed to migrate vCPU to core $CORE1"
+            fi
+            sleep "$INTERVAL"
+            virsh vcpupin "$DOMAIN" --vcpu 0 --cpulist "$CORE2" &>/dev/null
+            if [ $? -eq 0 ]; then
+                print_success "Migrated vCPU to core $CORE2"
+            else
+                print_error "Failed to migrate vCPU to core $CORE2"
+            fi
+            sleep "$INTERVAL"
+        done
+    }
+
+    if [[ "$BACKGROUND" =~ ^[Yy]$ ]]; then
+        nohup bash -c "$(declare -f migrate_loop); migrate_loop" &>/dev/null &
+        print_success "Migration started in background."
+        print_success "Equivalent command:"
+        echo "nohup vmanage -d $DOMAIN -o migrate --core1 $CORE1 --core2 $CORE2 --interval $INTERVAL &"
+    else
+        migrate_loop
+    fi
+}
+
+# Main logic
+if [ "$INTERACTIVE_MODE" -eq 1 ]; then
+    interactive_mode
+else
+    if [ -z "$DOMAIN" ] || [ -z "$OPERATION" ]; then
+        print_error "Domain and operation must be specified."
+        show_help
+        exit 1
+    fi
+
+    if [ "$OPERATION" == "vcpupin" ]; then
+        vcpupin_operation
+    elif [ "$OPERATION" == "migrate" ]; then
+        migrate_operation
+    else
+        print_error "Invalid operation '$OPERATION'."
+        exit 1
+    fi
+fi
+

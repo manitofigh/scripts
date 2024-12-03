@@ -66,7 +66,7 @@ sudo ./vmanage -d vm1 -o migrate --vcpu 1 --core1 0 --core2 4 --interval 60
 
 ## Sample Outputs
 
-### vCPU Pinning:
+### vCPU Pinning
 ```bash
 $ sudo ./vmanage -d vm1 -o vcpupin --distribute
 [+] vCPU count for domain 'vm1': 4
@@ -78,7 +78,7 @@ $ sudo ./vmanage -d vm1 -o vcpupin --distribute
 vmanage -d vm1 -o vcpupin --distribute
 ```
 
-### vCPU Migration:
+### vCPU Migration
 ```bash
 $ sudo ./vmanage -d vm1 -o vcpupin --distribute
 [+] vCPU count for domain 'vm1': 4

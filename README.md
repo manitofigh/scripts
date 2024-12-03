@@ -59,14 +59,14 @@ sudo ./vmanage -i
 sudo ./vmanage -d vm1 -o vcpupin -s 0
 ```
 
-- Migrate vCPU between physical cores 0 and 4 every 60 seconds:
+- Migrate `vm1`'s vCPU 1 between physical cores 0 and 4 every 60 seconds:
 ```bash
 sudo ./vmanage -d vm1 -o migrate --vcpu 1 --core1 0 --core2 4 --interval 60
 ```
 
 ## Sample Outputs
 
-- vCPU Pinning:
+### vCPU Pinning:
 ```bash
 $ sudo ./vmanage -d vm1 -o vcpupin --distribute
 [+] vCPU count for domain 'vm1': 4
@@ -78,7 +78,7 @@ $ sudo ./vmanage -d vm1 -o vcpupin --distribute
 vmanage -d vm1 -o vcpupin --distribute
 ```
 
-- vCPU Migration:
+### vCPU Migration:
 ```bash
 $ sudo ./vmanage -d vm1 -o vcpupin --distribute
 [+] vCPU count for domain 'vm1': 4

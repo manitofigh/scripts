@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+##################################
+## FOR LINUX-BASED SYSTEMS ONLY ##
+##################################
+
+if [ "$EUID" -ne 0 ]; then
+   echo "This script must be run as root" >&2
+   echo "Try \"sudo ht [option]\"" >&2
+   exit 1
+fi
+
+usage() {
+   echo "Usage: ht [option]"
+   echo "Options:"
+   echo "  -e    Enable hyperthreading"
+   echo "  -d    Disable hyperthreading"
+   echo "  -s    Show current status"
+   echo "  -h    Show this help message"
+   exit 1
+}
+
+status() {
+   if [ "$(cat /sys/devices/system/cpu/smt/control)" == "on" ]; then
+       echo "Hyperthreading is enabled"
+   else
+       echo "Hyperthreading is disabled"
+   fi
+}
+
+case "$1" in
+   -e)
+       echo on > /sys/devices/system/cpu/smt/control
+       echo "Hyperthreading enabled"
+       ;;
+   -d)
+       echo off > /sys/devices/system/cpu/smt/control
+       echo "Hyperthreading disabled"
+       ;;
+   -s)
+       status
+       ;;
+   -h|--help|*)
+       usage
+       ;;
+esac

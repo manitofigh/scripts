@@ -1,0 +1,234 @@
+#!/bin/bash
+
+#
+# bench - Command Output Aggregation Utility
+#
+# This script executes a given command multiple times, capturing numeric
+# output from successful runs and calculating statistical averages. The command
+# is expected to output a single number, with the user responsible for any
+# necessary filtering (grep, awk, etc.) within their command.
+#
+# The script discards failed attempts based on exit codes and provides
+# analysis of the numeric outputs including individual results and average
+# value across all successful executions.
+#
+# Author: Mani Tofigh
+#
+
+set -euo pipefail
+
+readonly SCRIPT_NAME="${0##*/}"
+readonly VERSION="1.0.0"
+
+usage() {
+    cat << EOF
+Usage: $SCRIPT_NAME <command> <iterations>
+
+DESCRIPTION:
+    Execute a command multiple times and calculate average of numeric outputs.
+    The command must output a single numeric value.
+
+ARGUMENTS:
+    command      Command to execute (quoted if contains spaces/special chars)
+    iterations   Number of times to run the command (positive integer)
+
+OPTIONS:
+    -h, --help   Show this help message
+    -v, --version Show version information
+
+EXAMPLES:
+    $SCRIPT_NAME "echo 42" 5
+    $SCRIPT_NAME "ps aux | wc -l" 10
+    $SCRIPT_NAME "grep -c pattern file.txt" 3
+
+EOF
+}
+
+version() {
+    echo "$SCRIPT_NAME version $VERSION"
+}
+
+error_exit() {
+    local message="$1"
+    local exit_code="${2:-1}"
+    
+    print_boxed_message "ERROR: $message" >&2
+    exit "$exit_code"
+}
+
+print_boxed_message() {
+    local message="$1"
+    local message_length=${#message}
+    local padding_length=$((message_length + 4))
+    local border_char="="
+    local padding_char=" "
+    
+    local border_line=""
+    local padding_line=""
+    
+    for ((i = 0; i < padding_length; i++)); do
+        border_line+="$border_char"
+        if [[ $i -eq 0 || $i -eq $((padding_length - 1)) ]]; then
+            padding_line+="$border_char"
+        else
+            padding_line+="$padding_char"
+        fi
+    done
+    
+    echo "$border_line"
+    echo "$padding_line"
+    echo "= $message ="
+    echo "$padding_line"
+    echo "$border_line"
+}
+
+show_usage_on_error() {
+    echo >&2
+    echo "Usage: $SCRIPT_NAME <command> <iterations>" >&2
+    echo >&2
+    echo "Parameters:" >&2
+    echo "  command      Command to execute (must output a number)" >&2
+    echo "  iterations   Number of times to run (positive integer)" >&2
+    echo >&2
+    echo "Example: $SCRIPT_NAME \"echo 42\" 5" >&2
+    echo >&2
+}
+
+validate_arguments() {
+    if [[ $# -ne 2 ]]; then
+        echo "ERROR: Invalid number of arguments. Expected 2, got $#." >&2
+        show_usage_on_error
+        exit 1
+    fi
+    
+    local command="$1"
+    local iterations="$2"
+    
+    if [[ -z "$command" ]]; then
+        echo "ERROR: Command cannot be empty." >&2
+        show_usage_on_error
+        exit 1
+    fi
+    
+    if ! [[ "$iterations" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: Iterations must be a positive integer. Got: '$iterations'" >&2
+        show_usage_on_error
+        exit 1
+    fi
+    
+    if [[ "$iterations" -gt 10000 ]]; then
+        echo "ERROR: Iterations cannot exceed 10000 for safety reasons." >&2
+        show_usage_on_error
+        exit 1
+    fi
+}
+
+is_numeric() {
+    local value="$1"
+    [[ "$value" =~ ^-?[0-9]+\.?[0-9]*$ ]]
+}
+
+format_number() {
+    local number="$1"
+    printf "%.6f" "$number"
+}
+
+calculate_average() {
+    local -a values=("$@")
+    local sum=0
+    local count=${#values[@]}
+    
+    for value in "${values[@]}"; do
+        sum=$(echo "$sum + $value" | bc -l)
+    done
+    
+    if [[ $count -gt 0 ]]; then
+        echo "scale=6; $sum / $count" | bc -l
+    else
+        echo "0"
+    fi
+}
+
+run_benchmark() {
+    local command="$1"
+    local iterations="$2"
+    local -a successful_outputs=()
+    local failed_count=0
+    local output
+    local exit_code
+    
+    print_boxed_message "Running command $iterations times: '$command'"
+    
+    for ((i = 1; i <= iterations; i++)); do
+        printf "Run %d/%d... " "$i" "$iterations"
+        
+        if output=$(eval "$command" 2>/dev/null); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+        
+        if [[ $exit_code -eq 0 ]] && is_numeric "$output"; then
+            successful_outputs+=("$output")
+            echo "SUCCESS (output: $output)"
+        else
+            ((failed_count++))
+            if [[ $exit_code -ne 0 ]]; then
+                echo "FAILED (exit code: $exit_code)"
+            else
+                echo "FAILED (non-numeric output: '$output')"
+            fi
+        fi
+    done
+    
+    local successful_count=${#successful_outputs[@]}
+    
+    echo
+    print_boxed_message "Results Summary"
+    echo
+    echo "Total runs: $iterations"
+    echo "Successful runs: $successful_count"
+    echo "Failed runs: $failed_count"
+    
+    if [[ $successful_count -eq 0 ]]; then
+        error_exit "No successful runs recorded. Cannot calculate statistics."
+    fi
+    
+    echo
+    echo "Individual outputs:"
+    for ((i = 0; i < successful_count; i++)); do
+        printf "  Run %d: %s\n" "$((i + 1))" "${successful_outputs[i]}"
+    done
+    
+    local average_output
+    average_output=$(calculate_average "${successful_outputs[@]}")
+    
+    echo
+    echo "Average output: $(format_number "$average_output")"
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -v|--version)
+            version
+            exit 0
+            ;;
+        -*)
+            error_exit "Unknown option: $1"
+            ;;
+    esac
+    
+    validate_arguments "$@"
+    
+    if ! command -v bc >/dev/null 2>&1; then
+        error_exit "Required command 'bc' not found. Please install bc package."
+    fi
+    
+    run_benchmark "$1" "$2"
+}
+
+main "$@"

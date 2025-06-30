@@ -22,24 +22,36 @@ readonly VERSION="1.0.0"
 
 usage() {
     cat << EOF
-Usage: $SCRIPT_NAME <command> <iterations>
+Usage: $SCRIPT_NAME -c <command> -n <iterations> [-a <description>] [-o <output_file>]
 
 DESCRIPTION:
     Execute a command multiple times and calculate average of numeric outputs.
     The command must output a single numeric value.
 
-ARGUMENTS:
-    command      Command to execute (quoted if contains spaces/special chars)
-    iterations   Number of times to run the command (positive integer)
+REQUIRED OPTIONS:
+    -c <command>     Command to execute (everything until next option)
+                     Use quotes if command contains options that conflict with ours
+    -n <iterations>  Number of times to run the command (positive integer)
 
-OPTIONS:
-    -h, --help   Show this help message
-    -v, --version Show version information
+OPTIONAL OPTIONS:
+    -a <description> Add description text (supports multiple words without quotes)
+    -o <output_file> Write complete output to specified file
+    -h, --help       Show this help message
+    -v, --version    Show version information
+
+COMMAND QUOTING:
+    If your command uses options like -n, -a, -o, -h, or -v, wrap it in quotes:
+    
+    SAFE:   $SCRIPT_NAME -c "myapp -n 100 -a file.txt" -n 5
+    UNSAFE: $SCRIPT_NAME -c myapp -n 100 -a file.txt -n 5
+    
+    The script supports both single and double quotes for the command.
 
 EXAMPLES:
-    $SCRIPT_NAME "echo 42" 5
-    $SCRIPT_NAME "ps aux | wc -l" 10
-    $SCRIPT_NAME "grep -c pattern file.txt" 3
+    $SCRIPT_NAME -c echo 42 -n 5
+    $SCRIPT_NAME -c "ps aux | wc -l" -n 10
+    $SCRIPT_NAME -c 'grep -c pattern file.txt' -n 3 -a test run with sample data
+    $SCRIPT_NAME -c "./benchmark -n 1000" -n 5 -a quiet system conditions -o results.txt
 
 EOF
 }
@@ -58,54 +70,198 @@ error_exit() {
 
 print_boxed_message() {
     local message="$1"
+    local description="${2:-}"
     local message_length=${#message}
-    local padding_length=$((message_length + 4))
+    local desc_text=""
+    local max_length=$message_length
+    
+    if [[ -n "$description" ]]; then
+        desc_text="DESCRIPTION: $description"
+        if [[ ${#desc_text} -gt $max_length ]]; then
+            max_length=${#desc_text}
+        fi
+    fi
+    
+    local padding_length=$((max_length + 4))
     local border_char="="
     local padding_char=" "
     
     local border_line=""
-    local padding_line=""
-    
     for ((i = 0; i < padding_length; i++)); do
         border_line+="$border_char"
-        if [[ $i -eq 0 || $i -eq $((padding_length - 1)) ]]; then
-            padding_line+="$border_char"
-        else
-            padding_line+="$padding_char"
-        fi
     done
     
+    local empty_line="="
+    for ((i = 0; i < max_length + 2; i++)); do
+        empty_line+="$padding_char"
+    done
+    empty_line+="="
+    
+    local message_line="= $message"
+    local message_padding=$((max_length - message_length))
+    for ((i = 0; i < message_padding; i++)); do
+        message_line+="$padding_char"
+    done
+    message_line+=" ="
+    
     echo "$border_line"
-    echo "$padding_line"
-    echo "= $message ="
-    echo "$padding_line"
+    echo "$empty_line"
+    echo "$message_line"
+    echo "$empty_line"
+    
+    if [[ -n "$description" ]]; then
+        local desc_line="= $desc_text"
+        local desc_padding=$((max_length - ${#desc_text}))
+        for ((i = 0; i < desc_padding; i++)); do
+            desc_line+="$padding_char"
+        done
+        desc_line+=" ="
+        echo "$desc_line"
+        echo "$empty_line"
+    fi
+    
     echo "$border_line"
 }
 
 show_usage_on_error() {
     echo >&2
-    echo "Usage: $SCRIPT_NAME <command> <iterations>" >&2
+    echo "Usage: $SCRIPT_NAME -c <command> -n <iterations> [-a <description>] [-o <output_file>]" >&2
     echo >&2
-    echo "Parameters:" >&2
-    echo "  command      Command to execute (must output a number)" >&2
-    echo "  iterations   Number of times to run (positive integer)" >&2
+    echo "Required options:" >&2
+    echo "  -c <command>     Command to execute" >&2
+    echo "  -n <iterations>  Number of times to run (positive integer)" >&2
     echo >&2
-    echo "Example: $SCRIPT_NAME \"echo 42\" 5" >&2
+    echo "Example: $SCRIPT_NAME -c echo 42 -n 5" >&2
     echo >&2
 }
 
-validate_arguments() {
-    if [[ $# -ne 2 ]]; then
-        echo "ERROR: Invalid number of arguments. Expected 2, got $#." >&2
+detect_conflicting_options() {
+    local command="$1"
+    local conflicting_options=("-n" "-a" "-o" "-h" "--help" "-v" "--version")
+    
+    for option in "${conflicting_options[@]}"; do
+        if [[ "$command" == *" $option "* ]] || [[ "$command" == *" $option" ]] || [[ "$command" == "$option "* ]]; then
+            echo "WARNING: Command contains option '$option' which conflicts with bench options." >&2
+            echo "Consider wrapping your command in quotes: -c \"$command\"" >&2
+            echo "This may cause unexpected behavior if not quoted properly." >&2
+            echo >&2
+            return 0
+        fi
+    done
+    return 1
+}
+
+parse_arguments() {
+    local command=""
+    local iterations=""
+    local description=""
+    local output_file=""
+    local parsing_command=false
+    local parsing_description=false
+    local command_is_quoted=false
+    local i=1
+    
+    while [[ $i -le $# ]]; do
+        case "${!i}" in
+            -c)
+                parsing_command=true
+                parsing_description=false
+                ((i++))
+                
+                if [[ $i -le $# ]]; then
+                    local next_arg="${!i}"
+                    if [[ "$next_arg" =~ ^[\"\'].*[\"\']$ ]]; then
+                        command_is_quoted=true
+                        command="${next_arg:1:$((${#next_arg} - 2))}"
+                        ((i++))
+                        parsing_command=false
+                    fi
+                fi
+                ;;
+            -n)
+                parsing_command=false
+                parsing_description=false
+                if [[ $((i + 1)) -le $# ]]; then
+                    ((i++))
+                    iterations="${!i}"
+                else
+                    echo "ERROR: -n requires an argument" >&2
+                    show_usage_on_error
+                    exit 1
+                fi
+                ((i++))
+                ;;
+            -a)
+                parsing_command=false
+                parsing_description=true
+                ((i++))
+                ;;
+            -o)
+                parsing_command=false
+                parsing_description=false
+                if [[ $((i + 1)) -le $# ]]; then
+                    ((i++))
+                    output_file="${!i}"
+                else
+                    echo "ERROR: -o requires an argument" >&2
+                    show_usage_on_error
+                    exit 1
+                fi
+                ((i++))
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -v|--version)
+                version
+                exit 0
+                ;;
+            -*)
+                if [[ $parsing_command == true ]]; then
+                    if [[ -n "$command" ]]; then
+                        command="$command ${!i}"
+                    else
+                        command="${!i}"
+                    fi
+                    ((i++))
+                else
+                    echo "ERROR: Unknown option: ${!i}" >&2
+                    show_usage_on_error
+                    exit 1
+                fi
+                ;;
+            *)
+                if [[ $parsing_command == true ]]; then
+                    if [[ -n "$command" ]]; then
+                        command="$command ${!i}"
+                    else
+                        command="${!i}"
+                    fi
+                elif [[ $parsing_description == true ]]; then
+                    if [[ -n "$description" ]]; then
+                        description="$description ${!i}"
+                    else
+                        description="${!i}"
+                    fi
+                else
+                    echo "ERROR: Unexpected argument: ${!i}" >&2
+                    show_usage_on_error
+                    exit 1
+                fi
+                ((i++))
+                ;;
+        esac
+    done
+    
+    if [[ -z "$command" ]]; then
+        echo "ERROR: Command (-c) is required" >&2
         show_usage_on_error
         exit 1
     fi
     
-    local command="$1"
-    local iterations="$2"
-    
-    if [[ -z "$command" ]]; then
-        echo "ERROR: Command cannot be empty." >&2
+    if [[ -z "$iterations" ]]; then
+        echo "ERROR: Number of iterations (-n) is required" >&2
         show_usage_on_error
         exit 1
     fi
@@ -121,6 +277,16 @@ validate_arguments() {
         show_usage_on_error
         exit 1
     fi
+    
+    if [[ $command_is_quoted == false ]]; then
+        detect_conflicting_options "$command"
+    fi
+    
+    echo "$command|$iterations|$description|$output_file"
+}
+
+validate_arguments() {
+    return 0
 }
 
 is_numeric() {
@@ -152,12 +318,22 @@ calculate_average() {
 run_benchmark() {
     local command="$1"
     local iterations="$2"
+    local description="$3"
+    local output_file="$4"
     local -a successful_outputs=()
     local failed_count=0
     local output
     local exit_code
+    local full_output=""
     
-    print_boxed_message "Running command $iterations times: '$command'"
+    local header_message="Running command $iterations times: '$command'"
+    
+    if [[ -n "$output_file" ]]; then
+        exec 3>&1 4>&2
+        exec > >(tee "$output_file") 2>&1
+    fi
+    
+    print_boxed_message "$header_message" "$description"
     
     for ((i = 1; i <= iterations; i++)); do
         printf "Run %d/%d... " "$i" "$iterations"
@@ -191,6 +367,9 @@ run_benchmark() {
     echo "Failed runs: $failed_count"
     
     if [[ $successful_count -eq 0 ]]; then
+        if [[ -n "$output_file" ]]; then
+            exec 1>&3 2>&4 3>&- 4>&-
+        fi
         error_exit "No successful runs recorded. Cannot calculate statistics."
     fi
     
@@ -205,30 +384,24 @@ run_benchmark() {
     
     echo
     echo "Average output: $(format_number "$average_output")"
+    
+    if [[ -n "$output_file" ]]; then
+        exec 1>&3 2>&4 3>&- 4>&-
+        echo "Output saved to: $output_file"
+    fi
 }
 
 main() {
-    case "${1:-}" in
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        -v|--version)
-            version
-            exit 0
-            ;;
-        -*)
-            error_exit "Unknown option: $1"
-            ;;
-    esac
+    local parsed_args
+    parsed_args=$(parse_arguments "$@")
     
-    validate_arguments "$@"
+    IFS='|' read -r command iterations description output_file <<< "$parsed_args"
     
     if ! command -v bc >/dev/null 2>&1; then
         error_exit "Required command 'bc' not found. Please install bc package."
     fi
     
-    run_benchmark "$1" "$2"
+    run_benchmark "$command" "$iterations" "$description" "$output_file"
 }
 
 main "$@"

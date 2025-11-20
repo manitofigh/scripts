@@ -1,6 +1,6 @@
 Don't forget:
 ```bash
-export PATH="$HOME/scripts:$PATH"
+echo 'export PATH="$HOME/scripts:$PATH"' >> ~/.zshrc
 ```
 
 In your `~/.zshrc` or `~/.bashrc` file
